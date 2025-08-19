@@ -1809,9 +1809,9 @@ bot.command("restart", async (ctx) => {
       (e) => e.groupId == groupId
     );
 
-    // if (!groupIsForEscrow) {
-    //   return await ctx.reply("Use /restart in escrow groups only"); //if they use in non-escrow groups or private chats
-    // }
+    if (!groupIsForEscrow) {
+      return await ctx.reply("Use /restart in escrow groups only"); //if they use in non-escrow groups or private chats
+    }
 
     let userEscrowGroup = findUserEscrow("@" + username);
     if (userEscrowGroup) {
