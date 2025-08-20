@@ -1,6 +1,16 @@
 const { model, Schema } = require("mongoose");
 
 const groupSchema = new Schema({
+  takingPartialAmount:{
+    type:Boolean, default:false
+  },
+  partialAmount:Number,
+  cancelled:{
+    type:Boolean,
+    default:false
+  },
+  cancelInvokerState:String, //Message upon which the cancel button was clicked
+  canceller:String, //Second user to finalize cancellation
   confirm1Msg:Number,// seller fiat receipt confirmation - initial
   confirm2Msg:Number,//seller Fiat receipt confimation - final
   dealSummaryMsg:Number,//Message referencing the deal's summary

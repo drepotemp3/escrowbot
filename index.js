@@ -35,6 +35,7 @@ const isFormMessage = require("./helpers/isFormMessage");
 const isGroupMember = require("./helpers/isGroupMember");
 const updateCache = require("./helpers/updateCache");
 const pinMessageInGroup = require("./helpers/pinMessage");
+const isGroupAdmin = require("./helpers/isGroupAdmin");
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
@@ -456,8 +457,9 @@ bot.action("confirm-deposit", async (ctx) => {
     }
 
     const { network, token, cryptoAmount } = userEscrowGroup.currentDeal;
-    if (!userEscrowGroup.waitingForDeposit) {
-      return await ctx.reply("Already confirmed deposit. Proceed.");
+    const { totalAmount, waitingForDeposit } = userEscrowGroup;
+    if (!waitingForDeposit) {
+      return await ctx.reply("Already confirmed deposit.\nPlease proceed.");
     }
 
     await ctx.reply("🔍 I will confirm in the next 5 secs...");
@@ -470,7 +472,7 @@ bot.action("confirm-deposit", async (ctx) => {
     };
     setTimeout(() => {
       const confirmBalances = async () => {
-        if (network == "pol") {
+        if (network == "POL") {
           const polBalances = await checkEvmBalance(
             "pol",
             wallets["POL"].address
@@ -478,7 +480,7 @@ bot.action("confirm-deposit", async (ctx) => {
           deposit["native"] = polBalances.native;
           deposit["usdc"] = polBalances.usdc;
           deposit["usdt"] = polBalances.usdt;
-        } else if (network == "sol") {
+        } else if (network == "SOL") {
           const solBalances = await checkSolBalance(wallets["SOL"].address);
           deposit["native"] = solBalances.native;
           deposit["usdc"] = solBalances.usdc;
@@ -497,26 +499,21 @@ bot.action("confirm-deposit", async (ctx) => {
         console.log("fetched deposits", deposit);
 
         //Reject native deposits
-        if (!deposit.usdc && !deposit.usdt)
+        if (!deposit[token.toLowerCase()])
           return await ctx.reply(
-            "No deposit found🔍\nIf you deposited actual Sol, Pol or Bnb, your funds are lost and non-refundable."
+            `No deposit of ${token} found🔍`,
+            { parse_mode: "Markdown" }
           );
 
         //Confirm deposit
-        let msg = ``;
-        if (deposit.usdt) {
-          msg += `Deposit of $${deposit.usdt} ${token.toUpperCase()} on ${
+        let msg = `Deposit of $${deposit.usdc} ${token.toUpperCase()} on ${
             network.toLowerCase() == "bep20" ? "BSC" : network.toUpperCase()
           } confirmed✅`;
-        } else if (deposit.usdc) {
-          msg += `Deposit of $${deposit.usdc} ${token.toUpperCase()} on ${
-            network.toLowerCase() == "bep20" ? "BSC" : network.toUpperCase()
-          } confirmed✅`;
-        }
+        
 
         //Check deposit equality
         const expectedAmount = userEscrowGroup.totalAmount;
-        const amountDeposited = deposit.usdc ? deposit.usdc : deposit.usdt;
+        const amountDeposited = deposit[token.toLowerCase()];
 
         //If they sent greater amounts
         if (amountDeposited > expectedAmount) {
@@ -539,24 +536,27 @@ bot.action("confirm-deposit", async (ctx) => {
             (cryptoAmount - (escrowFee + buyerNetworkFeeInUSD)).toFixed(3)
           ); //Deduct refund fee from buyer's payment
 
-          msg += `\n${excess ? `Expected amount: *${expectedAmount} USD*` : ""}
-Amount Deposited: *${amountDeposited} USD*
-Escrow Fee(0.5%): -*${escrowFee} USD*
-${excess ? `Refund Amount: *${refundAmount} USD*` : ""}
-${excess ? `Refund fee: -*${feeInUsd} USD*` : ""}
+          const buyerUsername = buyer.username.replace("@", "");
+          const buyerMention = `<a href="tg://user?id=${buyer.userId}">${buyerUsername}</a>`;
 
-Hey [${buyer.username}](tg://user?id=${
-            buyer.userId
-          }), you will receive: *$${buyerPayment}* USD
+          msg += `
+${excess ? `Expected amount: <b>${expectedAmount} USD</b>` : ""}
+Amount Deposited: <b>${amountDeposited} USD</b>
+Escrow Fee(0.5%):  <b>${escrowFee} USD</b>
+${excess ? `Refund Amount: <b>${refundAmount} USD</b>` : ""}
+${excess ? `Refund fee:  <b>${feeInUsd} USD</b>` : ""}
+
+Hey ${buyerMention}, you will receive: <b>${buyerPayment} USD</b>
 
 Please send the fiat equivalent of $${cryptoAmount} to ${seller.username} 👇
 
-*Payment Method:* ${userEscrowGroup.currentDeal.paymentMethod}
-*Payment Details:* ${userEscrowGroup.currentDeal.fiatPaymentDetails}
+<b>Payment Method:</b> ${userEscrowGroup.currentDeal.paymentMethod}
+<b>Payment Details:</b> ${userEscrowGroup.currentDeal.fiatPaymentDetails}
 
 After sending fiat, please confirm payment`;
+
           await ctx.reply(msg, {
-            parse_mode: "Markdown",
+            parse_mode: "HTML",
             reply_markup: {
               inline_keyboard: [
                 [
@@ -584,21 +584,8 @@ After sending fiat, please confirm payment`;
             { new: true }
           );
           //Update in cache
-          let previousActiveEscrows = global.activeEscrows;
-          previousActiveEscrows = previousActiveEscrows.filter(
-            (e) => e.groupId !== userEscrowGroup.groupId
-          );
-          const updatedActiveEscrows = [
-            ...previousActiveEscrows,
-            updatedGroupInfo,
-          ];
-          global.activeEscrows = updatedActiveEscrows;
-          console.log("updated", updatedActiveEscrows);
-          console.log(
-            "\n==========================\nGlobal\n",
-            global.activeEscrows
-          );
-          return;
+
+          return updateCache(userEscrowGroup, updatedGroupInfo);
         }
 
         //If they send lesser amounts
@@ -627,20 +614,22 @@ After topup, click *Confirm*✅ above so i can check`,
           const escrowFee = Number(((0.5 / 100) * cryptoAmount).toFixed(3));
           const buyerPayment = Number((cryptoAmount - escrowFee).toFixed(3));
 
-          msg += `\n
-Amount Deposited: *${amountDeposited} USD*
-Escrow Fee(0.5%): -*${escrowFee} USD*
+          msg += `
 
-Hey [${buyer.username}](tg://user?id=${buyer.userId}), you will receive: *$${buyerPayment}* USD
+Amount Deposited: <b>${amountDeposited} USD</b>
+Escrow Fee(0.5%): <b>${escrowFee} USD</b>
+
+Hey <a href="tg://user?id=${buyer.userId}">${buyer.username}</a>, you will receive: <b>$${buyerPayment} USD</b>
 
 Please send the fiat equivalent of $${cryptoAmount} to ${seller.username} 👇
 
-*Payment Method:* ${userEscrowGroup.currentDeal.paymentMethod}
-*Payment Details:* ${userEscrowGroup.currentDeal.fiatPaymentDetails}
+<b>Payment Method:</b> ${userEscrowGroup.currentDeal.paymentMethod}
+<b>Payment Details:</b> ${userEscrowGroup.currentDeal.fiatPaymentDetails}
 
 After sending fiat, please confirm payment`;
+
           await ctx.reply(msg, {
-            parse_mode: "Markdown",
+            parse_mode: "HTML",
             reply_markup: {
               inline_keyboard: [
                 [
@@ -680,6 +669,84 @@ After sending fiat, please confirm payment`;
   }
 });
 
+bot.action("admin-confirm-deposit", async (ctx) => {
+  //  await ctx.answerCbQuery();
+  try {
+    const isAdmin = await isGroupAdmin(ctx);
+    const groupId = Number(ctx.chat.id.toString().split("-100")[1]);
+    // if(!isAdmin) {
+    //   return await ctx.reply("A non-admin tried to confirm deposit manually⚠️\nFraud attempt😂\n\nONLY admins can do that!")
+    // }
+
+    const userEscrowGroup = global.activeEscrows.find(
+      (e) => e.groupId == groupId
+    );
+    const amountExpected = userEscrowGroup.totalAmount;
+    const { cryptoAmount, token, paymentMethod, fiatPaymentDetails } =
+      userEscrowGroup.currentDeal;
+    const seller = userEscrowGroup.currentDeal.participants.find(
+      (e) => e.role == "Seller"
+    );
+    const buyer = userEscrowGroup.currentDeal.participants.find(
+      (e) => e.role == "Buyer"
+    );
+
+    await ctx.deleteMessage();
+
+    await ctx.reply(
+      `Deposit of ${amountExpected.toFixed(
+        2
+      )} ${token} has been manually confirmed by the admin.`
+    );
+
+    const escrowFee = Number(((0.5 / 100) * cryptoAmount).toFixed(3));
+    const buyerPayment = Number((cryptoAmount - escrowFee).toFixed(3));
+    console.log(escrowFee, cryptoAmount, buyerPayment);
+    const msg = `
+Escrow Fee(0.5%): <b>${escrowFee} USD</b>
+
+Hey <a href="tg://user?id=${buyer.userId}">${buyer.username}</a>, you will receive: <b>$${buyerPayment} USD</b>
+
+Please send the fiat equivalent of $${cryptoAmount} to ${seller.username} 👇
+
+<b>Payment Method:</b> ${paymentMethod}
+<b>Payment Details:</b> ${fiatPaymentDetails}
+
+After sending fiat, please confirm payment`;
+
+    await ctx.reply(msg, {
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              text: "Fiat Paid✅",
+              callback_data: "confirm-fiat",
+            },
+          ],
+        ],
+      },
+    });
+
+    //Update group record with changed parameters
+    const updatedGroupInfo = await Group.findOneAndUpdate(
+      { groupId: userEscrowGroup.groupId },
+      {
+        $set: {
+          waitingForDeposit: false,
+          feeCount: 2,
+          withdrawalAmount: buyerPayment,
+        },
+      },
+      { new: true }
+    );
+    //Update in cache
+    updateCache(userEscrowGroup, updatedGroupInfo);
+  } catch (error) {
+    console.log("Error in admin deposit confirmation:\n", error);
+  }
+});
+
 bot.action("confirm-fiat", async (ctx) => {
   try {
     const username = ctx.from.username;
@@ -714,9 +781,9 @@ bot.action("confirm-fiat", async (ctx) => {
 
     const sellerMention = `<a href="tg://user?id=${seller.userId}">${seller.username}</a>`;
     const confirm1Msg = await ctx.reply(
-      `Hey ${sellerMention}, [Buyer] confirms they have paid fiat to you.
+      `Hey ${sellerMention}, the [Buyer] has confirmed fiat payment.
 
-Please check your account to confirm fiat payment before releasing the crypto.
+Please check your account to confirm fiat is received before releasing the crypto.
 
 Please note that this process is irreversible.
 
@@ -727,8 +794,25 @@ Please note that this process is irreversible.
           inline_keyboard: [
             [
               {
-                text: "Release Crypto",
+                text: "Release Payment",
                 callback_data: "fiat-received",
+              },
+            ],
+            [
+              {
+                text: "Partial Release Payment",
+                callback_data: "partial",
+              },
+            ],
+            [
+              {
+                text: "Dispute",
+                callback_data: "dispute",
+              },
+
+              {
+                text: "CANCEL",
+                callback_data: "try-cancel-release",
               },
             ],
           ],
@@ -778,7 +862,7 @@ bot.action("fiat-received", async (ctx) => {
     const invokerUsername = "@" + ctx.from.username;
     if (seller.username.toLowerCase() !== invokerUsername.toLowerCase()) {
       return ctx.reply(
-        `❌ You can't use that command.\nOnly [${seller.username}](tg://user?id=${seller.userId}) can confirm fiat receipt.`,
+        `❌ You can't use that command.\nOnly [${seller.username}](tg://user?id=${seller.userId}) can release payment.`,
         {
           parse_mode: "Markdown",
         }
@@ -830,6 +914,76 @@ bot.action("fiat-received", async (ctx) => {
   }
 });
 
+bot.action("partial", async (ctx) => {
+  try {
+    const username = ctx.from.username;
+
+    if (!username) {
+      return ctx.reply("❌ You must set a username to use that command.");
+    }
+
+    //check if they have an active escrow session
+    const userEscrowGroup = findUserEscrow("@" + username);
+    if (!userEscrowGroup) {
+      return ctx.reply("❌ Network error. Please try again.");
+    }
+
+    //check if the right party sent that command (buyer only)
+    const seller = userEscrowGroup.currentDeal.participants.find(
+      (e) => e.role == "Seller"
+    );
+    const buyer = userEscrowGroup.currentDeal.participants.find(
+      (e) => e.role == "Buyer"
+    );
+
+    const sellerMention = `<a href="tg://user?id=${seller.userId}">${seller.username}</a>`;
+    const buyerMention = `<a href="tg://user?id=${buyer.userId}">${buyer.username}</a>`;
+    const { groupId } = userEscrowGroup;
+    const { token, network } = userEscrowGroup.currentDeal;
+
+    const invokerUsername = "@" + ctx.from.username;
+    if (seller.username.toLowerCase() !== invokerUsername.toLowerCase()) {
+      return ctx.reply(
+        `❌ You can't click that button.\nOnly [${seller.username}](tg://user?id=${seller.userId}) can confirm release crypto partially.`,
+        {
+          parse_mode: "Markdown",
+        }
+      );
+    }
+
+    let feeInNative = await getFeeInNative(network.toUpperCase(), token);
+    const feeInUSD = await nativeFeeToUSD(network, feeInNative);
+
+    const message = `
+${sellerMention} [Seller] please <b>QUOTE</b> this message and reply with the Amount of <b>${token}</b> to Release to ${buyerMention} [Buyer].
+Please be mindful that the amount needs to be equivalent to the <b>INR</b> you received.
+
+⚠️ <b>Important:</b> Please discuss with the buyer before replying with the amount to avoid disputes.
+Once the seller replies with the amount, ${buyerMention} [Buyer] needs to confirm it before the release is finalized.
+The remaining ${token} will be refunded to the seller accordingly
+
+Escrow fees will be deducted before releasing ${token} to the Buyer.
+
+And Refund Network fee of $${feeInUSD.toFixed(
+      2
+    )} will be deducted before releasing to the Seller.`;
+
+    await ctx.editMessageText(message, {parse_mode:"HTML"});
+    const updatedGroupInfo = await Group.findOneAndUpdate(
+      { groupId },
+      {
+        $set: {
+          takingPartialAmount: true,
+        },
+      },
+      { new: true }
+    );
+    updateCache(userEscrowGroup, updatedGroupInfo);
+  } catch (error) {
+    console.log("Error in >partial handler:\n", error);
+  }
+});
+
 bot.action("i-am-responsible", async (ctx) => {
   try {
     const username = ctx.from.username;
@@ -855,7 +1009,7 @@ bot.action("i-am-responsible", async (ctx) => {
     const invokerUsername = "@" + ctx.from.username;
     if (seller.username.toLowerCase() !== invokerUsername.toLowerCase()) {
       return ctx.reply(
-        `❌ You can't use that command.\nOnly [${seller.username}](tg://user?id=${seller.userId}) can confirm fiat receipt.`,
+        `❌ You can't click that button.\nOnly [${seller.username}](tg://user?id=${seller.userId}) can confirm release crypto.`,
         {
           parse_mode: "Markdown",
         }
@@ -879,7 +1033,7 @@ bot.action("i-am-responsible", async (ctx) => {
 
     const { token, network, releaseAddress, refundAddress, cryptoAmount } =
       userEscrowGroup.currentDeal;
-    const { withdrawalAmount, refundAmount, name } = userEscrowGroup;
+    const { withdrawalAmount, refundAmount, name, groupId } = userEscrowGroup;
     const groupName = name;
     const escrowFee = Number(((0.5 / 100) * cryptoAmount).toFixed(3));
 
@@ -939,7 +1093,7 @@ bot.action("i-am-responsible", async (ctx) => {
 
 ${buyerMention} | ${sellerMention}
 
-Withdrawal of <b>${withdrawalAmount.toFixed(3)} ${token}</b> Finished!
+Withdrawal of <b>${withdrawalAmount.toFixed(2)} ${token}</b> Finished!
 
 Tx Hash:
 ${releaseTxHash}
@@ -952,6 +1106,7 @@ Please use /clean before leaving the group.
         await ctx.replyWithHTML(finalMsg, {
           disable_web_page_preview: true,
         });
+
         // 5. Process refunds if any, from escrow wallet to refund address
         if (refundAmount > 0) {
           console.log(
@@ -987,7 +1142,11 @@ Please use /clean before leaving the group.
           feeInNative
         );
 
-        const adminProfits = escrowFee + feesConsumedInUsd;
+        const adminProfits = Number(
+          parseFloat(
+            escrowFee.toFixed(2) + feesConsumedInUsd.toFixed(2)
+          ).toFixed(2)
+        );
         // const adminProfits = 0.005
 
         console.log("Admin profits", adminProfits);
@@ -999,12 +1158,14 @@ Please use /clean before leaving the group.
           adminWalletToReceiveProfits,
           escrowWalletPrivateKey
         );
+
+        //Broadcast to admins
         for (const admin of global.systemData.admins) {
           if (adminProfitTxHash) {
             bot.telegram.sendMessage(
               admin,
               "✅✅New Payout💰🪙💴\n\n\nReceived escrow profits of *" +
-                adminProfits.toFixed(3) +
+                adminProfits.toFixed(2) +
                 " " +
                 token.toUpperCase() +
                 "* from " +
@@ -1022,6 +1183,30 @@ Please use /clean before leaving the group.
             );
           }
         }
+
+        //Reset group data
+        const updatedGroupInfo = await Group.findOneAndUpdate(
+          { groupId },
+          {
+            $set: {
+              formFilled: false,
+              waitingForDeposit: false,
+              "currentDeal.token": "",
+              "currentDeal.network": "",
+              "currentDeal.sellerConfirmed": false,
+              "currentDeal.buyerConfirmed": false,
+              "currentDeal.fiatPaymentDetails": "",
+              "currentDeal.cryptoAmount": 0,
+              "currentDeal.paymentMethod": "",
+              "currentDeal.releaseAddress": "",
+              "currentDeal.refundAddress": "",
+              "currentDeal.withdrawalAmount": 0,
+              "currentDeal.totalAmount": 0,
+            },
+          },
+          { new: true }
+        );
+        updateCache(userEscrowGroup, updatedGroupInfo);
       } else {
         await ctx.reply(
           "Error withdrawing to release address.\nPlease try again."
@@ -1353,12 +1538,10 @@ bot.action(/^select-(.+)$/, async (ctx) => {
     const invoker = "@" + username;
     const userEscrowGroup = findUserEscrow(invoker);
     const { participants, token } = userEscrowGroup.currentDeal;
-    console.log(
-      "==============================\nThe main problem\n",
-      userEscrowGroup
-    );
+
     const seller = participants.find((e) => e.role == "Seller");
     const buyer = participants.find((e) => e.role == "Buyer");
+
     if (invoker.toLowerCase() !== seller.username.toLowerCase()) {
       return await ctx.reply(
         "Buyer tried to select network❌\nOnly Seller can select network."
@@ -1578,11 +1761,11 @@ You will receive a seperate <b>Escrow Deposit Address</b> after confirming the d
 ▶️ <b>Seller:</b> ${seller.username} ✅
 ▶️ <b>Token:</b> ${token}
 ▶️ <b>Chain:</b> ${network}
-▶️ <b>Network Fee:</b> ${feeInUSD.toFixed(3)} USD
+▶️ <b>Network Fee:</b> ${feeInUSD.toFixed(2)} USD
 ▶️ <b>Amount[${token}]:</b> ${cryptoAmount}
 ▶️ <b>Amount[INR]:</b> ${fiatAmount}
 ▶️ <b>Payment Method:</b> ${userEscrowGroup.currentDeal.paymentMethod}
-▶️ <b>Total Escrow Fees:</b> ${escrowFee.toFixed(3)} USD
+▶️ <b>Total Escrow Fees:</b> ${escrowFee.toFixed(2)} USD
 ▶️ <b>Release Address:</b> ${userEscrowGroup.currentDeal.releaseAddress}
 ▶️ <b>Refund Address:</b> ${userEscrowGroup.currentDeal.refundAddress}
 ▶️ <b>Payment Details:</b> ${fiatPaymentDetails}
@@ -1634,6 +1817,12 @@ ${
                       callback_data: "buyer-deal-confirm",
                     },
                   ],
+                  [
+                    {
+                      text: "Cancel",
+                      callback_data: "try-cancel-ds",
+                    },
+                  ],
                 ],
               },
             }
@@ -1676,11 +1865,11 @@ You will receive a seperate <b>Escrow Deposit Address</b> after confirming the d
 ▶️ <b>Seller:</b> ${seller.username} ${sellerConfirmed ? "✅" : ""}
 ▶️ <b>Token:</b> ${token}
 ▶️ <b>Chain:</b> ${network}
-▶️ <b>Network Fee:</b> ${feeInUSD.toFixed(3)} USD
+▶️ <b>Network Fee:</b> ${feeInUSD.toFixed(2)} USD
 ▶️ <b>Amount[${token}]:</b> ${cryptoAmount}
 ▶️ <b>Amount[INR]:</b> ${fiatAmount}
 ▶️ <b>Payment Method:</b> ${userEscrowGroup.currentDeal.paymentMethod}
-▶️ <b>Total Escrow Fees:</b> ${escrowFee.toFixed(3)} USD
+▶️ <b>Total Escrow Fees:</b> ${escrowFee.toFixed(2)} USD
 ▶️ <b>Release Address:</b> ${userEscrowGroup.currentDeal.releaseAddress}
 ▶️ <b>Refund Address:</b> ${userEscrowGroup.currentDeal.refundAddress}
 ▶️ <b>Payment Details:</b> ${fiatPaymentDetails}
@@ -1732,6 +1921,13 @@ ${
                       callback_data: "seller-deal-confirm",
                     },
                   ],
+
+                  [
+                    {
+                      text: "Cancel",
+                      callback_data: "try-cancel-ds",
+                    },
+                  ],
                 ],
               },
             }
@@ -1766,12 +1962,7 @@ bot.command("cancel", async (ctx) => {
       }
     }
 
-    await clearGroupMessages(client, {
-      id: userEscrowGroup.groupId,
-      accessHash: userEscrowGroup.accessHash,
-    });
-
-    const updatedGroupInfo = Group.findOneAndUpdate(
+    const updatedGroupInfo = await Group.findOneAndUpdate(
       { groupId },
       {
         $set: {
@@ -1786,15 +1977,65 @@ bot.command("cancel", async (ctx) => {
           "currentDeal.paymentMethod": "",
           "currentDeal.releaseAddress": "",
           "currentDeal.refundAddress": "",
+          "currentDeal.withdrawalAmount": 0,
+          "currentDeal.totalAmount": 0,
         },
-      }
+      },
+      { new: true }
     );
     updateCache(userEscrowGroup, updatedGroupInfo);
-    await ctx.reply(
-      "Deal cancelled by @" +
-        username +
-        ".\nUse /restart to start over if needed."
+    await ctx.reply("Deal cancelled.\nUse /restart to start over if needed.");
+  } catch (error) {
+    console.log("Error in cancel handler:\n", error);
+  }
+});
+
+bot.action("cancel", async (ctx) => {
+  try {
+    await answerCbQuery();
+    const username = ctx.from.username;
+    let groupId = ctx.chat.id;
+    groupId = Number(groupId.toString().split("-100")[1]);
+    const groupIsForEscrow = global.activeEscrows.find(
+      (e) => e.groupId == groupId
     );
+
+    if (!groupIsForEscrow) {
+      return await ctx.reply("Use /clean in escrow groups only"); //if they use in non-escrow groups or private chats
+    }
+
+    let userEscrowGroup = findUserEscrow("@" + username);
+    if (userEscrowGroup) {
+      if (userEscrowGroup.groupId !== groupId) {
+        return await ctx.reply("Use /clean in escrow groups only"); //if they use in non-escrow groups
+      }
+    }
+
+    await ctx.deleteMessage();
+
+    const updatedGroupInfo = await Group.findOneAndUpdate(
+      { groupId },
+      {
+        $set: {
+          formFilled: false,
+          waitingForDeposit: false,
+          "currentDeal.token": "",
+          "currentDeal.network": "",
+          "currentDeal.sellerConfirmed": false,
+          "currentDeal.buyerConfirmed": false,
+          "currentDeal.fiatPaymentDetails": "",
+          "currentDeal.cryptoAmount": 0,
+          "currentDeal.paymentMethod": "",
+          "currentDeal.releaseAddress": "",
+          "currentDeal.refundAddress": "",
+          "currentDeal.withdrawalAmount": 0,
+          "currentDeal.totalAmount": 0,
+        },
+      },
+      { new: true }
+    );
+    updateCache(userEscrowGroup, updatedGroupInfo);
+    await ctx.reply("Deal cancelled\nUse /restart to start over if needed.");
   } catch (error) {
     console.log("Error in cancel handler:\n", error);
   }
@@ -1820,14 +2061,462 @@ bot.command("restart", async (ctx) => {
       }
     }
 
-    startEscrow(
-      userEscrowGroup,
-      ctx,
-      userEscrowGroup.currentDeal.participants,
-      true
+    await clearGroupMessages(client, {
+      id: userEscrowGroup.groupId,
+      accessHash: userEscrowGroup.accessHash,
+    });
+
+    const updatedGroupInfo = await Group.findOneAndUpdate(
+      { groupId },
+      {
+        $set: {
+          withdrawalAmount: 0,
+          totalAmount: 0,
+          formFilled: false,
+          waitingForDeposit: false,
+          "currentDeal.token": "",
+          "currentDeal.network": "",
+          "currentDeal.sellerConfirmed": false,
+          "currentDeal.buyerConfirmed": false,
+          "currentDeal.fiatPaymentDetails": "",
+          "currentDeal.cryptoAmount": 0,
+          "currentDeal.paymentMethod": "",
+          "currentDeal.releaseAddress": "",
+          "currentDeal.refundAddress": "",
+        },
+      },
+      { new: true }
     );
+    updateCache(userEscrowGroup, updatedGroupInfo);
+    await ctx.reply("Deal cancelled and restarted.");
+
+    await startEscrow(
+      updatedGroupInfo,
+      ctx,
+      updatedGroupInfo.currentDeal.participants
+    ),
+      true;
   } catch (error) {
     console.log("Error in cancel handler:\n", error);
+  }
+});
+
+bot.action("back", async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+    const username = ctx.from.username;
+    if (!username)
+      return await ctx.reply(
+        "Someone clicked a button here.\nPlease set a username before using escrow bot."
+      );
+
+    const invoker = "@" + username;
+    const userEscrowGroup = findUserEscrow(invoker);
+    const {
+      participants,
+      token,
+      cryptoAmount,
+      network,
+      fiatAmount,
+      fiatPaymentDetails,
+    } = userEscrowGroup.currentDeal;
+    const { cancelInvokerState, groupId } = userEscrowGroup;
+    const cryptoType = userEscrowGroup.currentDeal.token;
+
+    const seller = participants.find((e) => e.role == "Seller");
+    const buyer = participants.find((e) => e.role == "Buyer");
+    const sellerMention = `<a href="tg://user?id=${seller.userId}">${seller.username}</a>`;
+    const buyerMention = `<a href="tg://user?id=${buyer.userId}">${buyer.username}</a>`;
+
+    const keyboards = [];
+    let message = ``;
+    if (cancelInvokerState == "ns") {
+      message =
+        sellerMention + " Select Deposit Network for <b>" + cryptoType + "</b>";
+      message +=
+        "\n\n🔷 <b>Note to Buyer</b> " +
+        buyerMention +
+        ": You will only be able to withdraw " +
+        cryptoType +
+        " on the network selected by the seller.";
+
+      await ctx.editMessageText(message, {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: `${cryptoType}[BSC]`,
+                callback_data: "select-bep20",
+              },
+              {
+                text: `${cryptoType}[Polygon]`,
+                callback_data: "select-pol",
+              },
+            ],
+            [{ text: `${cryptoType}[SOL]`, callback_data: "select-sol" }],
+            [{ text: "Cancel", callback_data: "try-cancel-ns" }],
+          ],
+        },
+      });
+    } else if (cancelInvokerState == "ds") {
+      //Calculate escrow fees (0.5%)
+      const escrowFee = (0.5 / 100) * cryptoAmount;
+      let feeInNative = await getFeeInNative(network.toUpperCase(), token);
+      const feeInUSD = await nativeFeeToUSD(network, feeInNative * 2); //2x due to transfer to release + transfer to admin
+      const totalDeposit = (
+        Number(cryptoAmount.toFixed(3)) + Number(feeInUSD.toFixed(3))
+      ).toFixed(3);
+
+      const warning = `🚫 <b>IMPORTANT:</b> ${sellerMention}, <b>do <u>NOT</u></b> deposit any ${token}s to the addresses above.
+You will receive a seperate <b>Escrow Deposit Address</b> after confirming the deal details.
+
+🔷 <b>Note to Buyer (${buyerMention}):</b> You can only withdraw ${token} on the <b>${network}</b> network as selected by the seller.`;
+      const buyerConfirmed = userEscrowGroup.currentDeal.buyerConfirmed;
+      const sellerConfirmed = userEscrowGroup.currentDeal.sellerConfirmed;
+
+      //Send deal summary
+      const text = `Both parties, please review the deal details below carefully and confirm if everything is correct.
+
+▶️ <b>Buyer:</b> ${buyer.username} ${buyerConfirmed ? "✅" : ""}
+▶️ <b>Seller:</b> ${seller.username} ${sellerConfirmed ? "✅" : ""}
+▶️ <b>Token:</b> ${token}
+▶️ <b>Chain:</b> ${network}
+▶️ <b>Network Fee:</b> ${feeInUSD.toFixed(2)} USD
+▶️ <b>Amount[${token}]:</b> ${cryptoAmount}
+▶️ <b>Amount[INR]:</b> ${fiatAmount}
+▶️ <b>Payment Method:</b> ${userEscrowGroup.currentDeal.paymentMethod}
+▶️ <b>Total Escrow Fees:</b> ${escrowFee.toFixed(2)} USD
+▶️ <b>Release Address:</b> ${userEscrowGroup.currentDeal.releaseAddress}
+▶️ <b>Refund Address:</b> ${userEscrowGroup.currentDeal.refundAddress}
+▶️ <b>Payment Details:</b> ${fiatPaymentDetails}
+
+===================================
+▶️ <b>Total Cryto Deposit:</b> =  <b>Amount</b><i>(${cryptoAmount} USD)</i> + <b>Network fee</b><i>(${feeInUSD.toFixed(
+        3
+      )} USD)</i> = ${totalDeposit} USD
+          
+${
+  buyerConfirmed
+    ? `Buyer Confirmed!! Waiting for Seller's confirmation...\n\n${warning}`
+    : ""
+}
+
+${
+  sellerConfirmed
+    ? `Seller Confirmed!! Waiting for Buyer's confirmation...\n\n${warning}`
+    : ""
+}`;
+      console.log(buyerConfirmed, sellerConfirmed);
+
+      if (buyerConfirmed && !sellerConfirmed) {
+        keyboards.push([
+          {
+            text: "Confirm [Buyer]",
+            callback_data: "buyer-deal-confirm",
+          },
+        ]);
+
+        keyboards.push([{ text: "Cancel", callback_data: "try-cancel-ds" }]);
+      } else if (sellerConfirmed && !buyerConfirmed) {
+        keyboards.push([
+          {
+            text: "Confirm [Seller]",
+            callback_data: "seller-deal-confirm",
+          },
+        ]);
+        keyboards.push([{ text: "Cancel", callback_data: "try-cancel-ds" }]);
+      } else if (!buyerConfirmed && !sellerConfirmed) {
+        keyboards.push([
+          { text: "Confirm [Buyer]", callback_data: "buyer-deal-confirm" },
+          { text: "Confirm [Seller]", callback_data: "seller-deal-confirm" },
+        ]);
+        keyboards.push([{ text: "Cancel", callback_data: "try-cancel-ds" }]);
+      }
+
+      await ctx.editMessageText(text, {
+        parse_mode: "HTML", // or "HTML"
+        reply_markup: {
+          inline_keyboard: keyboards,
+        },
+      });
+    } else if (cancelInvokerState == "rd") {
+      await ctx.deleteMessage();
+      await requestDeposit(userEscrowGroup, ctx);
+    } else if (cancelInvokerState == "release") {
+      await ctx.editMessageText(
+        `Hey ${sellerMention}, the [Buyer] has confirmed fiat payment.
+
+Please check your account to confirm fiat is received before releasing the crypto.
+
+Please note that this process is irreversible.
+
+<b>Release Crypto ONLY</b> if you are <b>SURE</b>`,
+        {
+          parse_mode: "HTML",
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  text: "Release Payment",
+                  callback_data: "fiat-received",
+                },
+              ],
+              [
+                {
+                  text: "Partial Release Payment",
+                  callback_data: "partial",
+                },
+              ],
+              [
+                {
+                  text: "Dispute",
+                  callback_data: "dispute",
+                },
+
+                {
+                  text: "CANCEL",
+                  callback_data: "try-cancel-release",
+                },
+              ],
+            ],
+          },
+        }
+      );
+    }
+  } catch (error) {
+    console.log("Error in >back handler:\n", error);
+  }
+});
+
+bot.command("pay_partial", async (ctx) => {
+  try {
+    // await ctx.answerCbQuery();
+    const username = ctx.from.username;
+    if (!username) {
+      return await ctx.reply(
+        "❌ Someone tried to confirm without having a username.\nSet a username to use escrowbot."
+      );
+    }
+    const invoker = "@" + username.toLowerCase();
+    const userEscrowGroup = findUserEscrow(invoker);
+    console.log(userEscrowGroup)
+    const {
+      participants,
+      cryptoAmount,
+      network,
+      token,
+      releaseAddress,
+      refundAddress,
+    } = userEscrowGroup.currentDeal;
+    const { name, groupId, partialAmount } = userEscrowGroup;
+    const seller = participants.find((e) => e.role == "Seller");
+    const buyer = participants.find((e) => e.role == "Buyer");
+    if (invoker.toLowerCase() !== buyer.username.toLowerCase()) {
+      return await ctx.reply("❌ Only [Buyer] can confirm partial release.");
+    }
+
+    const sellerMention = `<a href="tg://user?id=${seller.userId}">${seller.username}</a>`;
+    const buyerMention = `<a href="tg://user?id=${buyer.userId}">${buyer.username}</a>`;
+
+    //Process partial release.
+    let feeInNative = await getFeeInNative(network.toUpperCase(), token);
+    feeInNative = Number(feeInNative)
+    console.log("Fee in native", feeInNative, "...network", network, token)
+    const feeInUSD = await nativeFeeToUSD(network, feeInNative);
+    const escrowFee = Number((0.5 / 100) * partialAmount);
+    console.log("p ", partialAmount)
+    console.log("escrow fee",escrowFee)
+    const buyerPayment = partialAmount - escrowFee;
+    const amountLeft = cryptoAmount - partialAmount;
+    const sellerPayment = amountLeft - feeInUSD;
+    const adminProfit = escrowFee + escrowFee * 3; //2x for release tx and admin profit tx, 1x for buyer refund
+
+    //Send 3x fees to escrow address
+    const escrowWalletAddress =
+      userEscrowGroup.wallets[network.toUpperCase()].address;
+    const escrowWalletPrivateKey =
+      userEscrowGroup.wallets[network.toUpperCase()].privateKey;
+    const gasWalletPrivateKey =
+      global.systemData.gasFeeWallets[network.toUpperCase()].privateKey;
+    console.log("Transfering native fees for ", name, "...");
+    try {
+      await transferFunds(
+        Number((feeInNative * 3)),
+        network.toLowerCase(),
+        escrowWalletAddress,
+        gasWalletPrivateKey
+      );
+
+      //Send buyer payment
+      try {
+        const releaseTxHash = await transferFunds(
+          Number(buyerPayment.toFixed(2)),
+          `${token}_${network}`.toLowerCase(),
+          releaseAddress,
+          escrowWalletPrivateKey
+        );
+
+        await ctx.reply(
+          `✅ ${buyerPayment.toFixed(
+            2
+          )} ${token} sent to ${buyerMention}\n\n<b>Tx Hash:</b>\n\n${releaseTxHash}`,{parse_mode:"HTML"}
+        );
+
+        //Send refund to seller
+        try {
+          const refundTxHash = await transferFunds(
+            Number(sellerPayment.toFixed(2)),
+            `${token}_${network}`.toLowerCase(),
+            refundAddress,
+            escrowWalletPrivateKey
+          );
+
+          await ctx.reply(
+            `✅ ${sellerPayment.toFixed(
+              2
+            )} ${token} sent to ${sellerMention}\n\n<b>Tx Hash:</b>\n\n${refundTxHash}`,{parse_mode:"HTML"}
+          );
+
+          //Send admin profits (No try-catch so we can reach code below transfer fn)
+          console.log("Admin profits", adminProfit);
+          const adminWalletToReceiveProfits =
+            global.systemData.gasFeeWallets[network.toUpperCase()].address;
+
+          const adminProfitTxHash = await transferFunds(
+            Number(adminProfit.toFixed(2)),
+            `${token}_${network}`.toLowerCase(),
+            adminWalletToReceiveProfits,
+            escrowWalletPrivateKey
+          );
+
+          //Broadcast to admins
+          for (const admin of global.systemData.admins) {
+            if (adminProfitTxHash) {
+              bot.telegram.sendMessage(
+                admin,
+                "✅✅New Payout💰🪙💴\n\n\nReceived escrow profits of <b>" +
+                  adminProfit.toFixed(2) +
+                  " " +
+                  token.toUpperCase() +
+                  "</b> from " +
+                  name +
+                  "\n\n" +
+                  adminProfitTxHash,
+                { parse_mode: "HTML", disable_web_page_preview: true }
+              );
+              console.log("Paid admin.\n", adminProfitTxHash);
+            } else {
+              bot.telegram.sendMessage(
+                admin,
+                `Error withdrawing admin escrow profits from ${name}
+              \nPlease contact dev immediately.`
+              );
+            }
+          }
+
+          // //Reset group data
+          // const updatedGroupInfo = await Group.findOneAndUpdate(
+          //   { groupId },
+          //   {
+          //     $set: {
+          //       formFilled: false,
+          //       waitingForDeposit: false,
+          //       "currentDeal.token": "",
+          //       "currentDeal.network": "",
+          //       "currentDeal.sellerConfirmed": false,
+          //       "currentDeal.buyerConfirmed": false,
+          //       "currentDeal.fiatPaymentDetails": "",
+          //       "currentDeal.cryptoAmount": 0,
+          //       "currentDeal.paymentMethod": "",
+          //       "currentDeal.releaseAddress": "",
+          //       "currentDeal.refundAddress": "",
+          //       "currentDeal.withdrawalAmount": 0,
+          //       "currentDeal.totalAmount": 0,
+          //     },
+          //   },
+          //   { new: true }
+          // );
+          // updateCache(userEscrowGroup, updatedGroupInfo);
+        } catch (error) {
+          console.log(
+            "Error transfering seller refund to refund address for " +
+              name +
+              ":\n",
+            error
+          );
+        }
+      } catch (error) {
+        console.log(
+          "Error transfering buyer payment to release address for " +
+            name +
+            ":\n",
+          error
+        );
+      }
+    } catch (error) {
+      console.log("Error transfering native fees to " + name + ":\n", error);
+    }
+  } catch (error) {
+    console.log("Error in >pay-partial handler:\n", error);
+  }
+});
+
+bot.action(/^try-cancel-(.+)$/, async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+    const clickState = ctx.match[1];
+    const invoker = ctx.from.username;
+    if (!invoker) {
+      await ctx.reply(
+        "😕Someone tried to cancel the deal after removing their username.\nWhy did you removed your username???\n\nEscrowbot must be operated with a username!"
+      );
+    }
+
+    const isAdmin = await isGroupAdmin(ctx);
+    if (isAdmin) {
+      return; //Silently ignore, admin cannot cancel deals
+    }
+
+    let userEscrowGroup = findUserEscrow("@" + invoker);
+    const updatedGroupInfo = await Group.findOneAndUpdate(
+      { groupId: userEscrowGroup.groupId },
+      {
+        $set: {
+          canceller: "@" + invoker.toLowerCase(),
+          cancelInvokerState: clickState,
+        },
+      },
+      { new: true }
+    );
+    updateCache(userEscrowGroup, updatedGroupInfo);
+
+    const otherParty = userEscrowGroup.currentDeal.participants.find(
+      (e) => e.username.toLowerCase() !== "@" + invoker.toLowerCase()
+    );
+    const invokerData = userEscrowGroup.currentDeal.participants.find(
+      (e) => e.username.toLowerCase() == "@" + invoker.toLowerCase()
+    );
+    const invokerMention = `<a href="tg://user?id=${invokerData.userId}">${invokerData.username}</a>`;
+    const otherPartyMention = `<a href="tg://user?id=${otherParty.userId}">${otherParty.username}</a>`;
+
+    const message = `${invokerMention} [${invokerData.role}] has proposed to cancel the deal.
+    
+${otherPartyMention} [${otherParty.role}] please confirm cancellation.
+
+<b>Note:</b> Upon confirmation, the deal will be cancelled. Any deposited ${userEscrowGroup.currentDeal.token} will be refunded to ${invokerMention} [${invokerData.role}] after deducting 0.5% (Cancellation charge). Please be aware that this action is irreversible.`;
+
+    await ctx.editMessageText(message, {
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "Cancel Deal", callback_data: "cancel" }],
+          [{ text: "Back", callback_data: "back" }],
+        ],
+      },
+    });
+  } catch (error) {
+    console.log("Error in try-cancel handler:\n", error);
   }
 });
 
@@ -1949,7 +2638,6 @@ bot.on("message", async (ctx) => {
           const messageCheck = isFormMessage(text);
 
           if (messageCheck.isAFormMessage) {
-            console.log(userEscrowGroup);
             if (userEscrowGroup.formFilled) {
               return await ctx.reply(
                 "Form is already filled. Proceed with the next steps.",
@@ -2069,6 +2757,7 @@ bot.on("message", async (ctx) => {
                     },
                   ],
                   [{ text: `${cryptoType}[SOL]`, callback_data: "select-sol" }],
+                  [{ text: "Cancel", callback_data: "try-cancel-ns" }],
                 ],
               },
             });
@@ -2094,11 +2783,8 @@ bot.on("message", async (ctx) => {
               },
               { new: true }
             );
-            console.log(updatedGroupInfo);
             //Update cache
             updateCache(userEscrowGroup, updatedGroupInfo);
-
-            console.log(messageCheck.data);
           }
         }
       }
@@ -2130,9 +2816,56 @@ bot.on("message", async (ctx) => {
           const buyer = participants.find((e) => e.role == "Buyer");
           const sellerMention = `<a href="tg://user?id=${seller.userId}">${seller.username}</a>`;
           const buyerMention = `<a href="tg://user?id=${buyer.userId}">${buyer.username}</a>`;
-
+          const { groupId } = userEscrowGroup;
           //Determine action depending on group state
           //Check the message that was replied, to determine the action
+          if (userEscrowGroup.takingPartialAmount) {
+            //Handle partial amount input
+
+            const isNumber = (str) =>
+              !isNaN(str) && !isNaN(parseFloat(str)) && isFinite(str);
+            if (!isNumber(text) || Number(text) < 0) {
+              return await ctx.reply("Thats not a valid amount.", {
+                reply_to_message_id: ctx.message.message_id,
+              });
+            }
+
+            // if (Number(text) <= 5) {
+            //   return await ctx.reply(
+            //     "$" + Number(text) + " too low to transact.\nQuote the message above again with at least $20",
+            //     { reply_to_message_id: ctx.message.message_id }
+            //   );
+            // }
+
+            const message = `<b><u>Partial Release Confirmation</u></b>
+${sellerMention} has proposed to release <b>${Number(text)} ${token}</b> to you.
+
+${buyerMention} please review and confirm if you agree with this amount.
+
+⚠️ <b>Note:</b> Once confirmed, the USDC will be released and cannot be reversed.`;
+
+            await ctx.reply(message, {
+              parse_mode: "HTML",
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: "CONFIRM[BUYER]", callback_data: "pay-partial" }],
+                  [{ text: "Dispute", callback_data: "dispute" }],
+                ],
+              },
+            });
+            const updatedGroupInfo = await Group.findOneAndUpdate(
+              { groupId },
+              {
+                $set: {
+                  partialAmount: Number(text),
+                  takingPartialAmount: false,
+                },
+              },
+              { new: true }
+            );
+            updateCache(userEscrowGroup, updatedGroupInfo);
+          }
+
           const buyerAddressPromptMsg = userEscrowGroup?.buyerAddressPromptMsg;
           if (
             buyerAddressPromptMsg &&
@@ -2302,11 +3035,11 @@ Ensure your details are correct to avoid any payment issue.`;
 ▶️ <b>Seller:</b> ${seller.username}
 ▶️ <b>Token:</b> ${token}
 ▶️ <b>Chain:</b> ${network}
-▶️ <b>Network Fee:</b> ${feeInUSD.toFixed(3)} USD
+▶️ <b>Network Fee:</b> ${feeInUSD.toFixed(2)} USD
 ▶️ <b>Amount[${token}]:</b> ${cryptoAmount}
 ▶️ <b>Amount[INR]:</b> ${fiatAmount}
 ▶️ <b>Payment Method:</b> ${userEscrowGroup.currentDeal.paymentMethod}
-▶️ <b>Total Escrow Fees:</b> ${escrowFee.toFixed(3)} USD
+▶️ <b>Total Escrow Fees:</b> ${escrowFee.toFixed(2)} USD
 ▶️ <b>Release Address:</b> ${userEscrowGroup.currentDeal.releaseAddress}
 ▶️ <b>Refund Address:</b> ${userEscrowGroup.currentDeal.refundAddress}
 ▶️ <b>Payment Details:</b> ${ctx.message.text}
@@ -2334,6 +3067,12 @@ You will receive a seperate <b>Escrow Deposit Address</b> after confirming the d
                     {
                       text: "Confirm [Buyer]",
                       callback_data: "buyer-deal-confirm",
+                    },
+                  ],
+                  [
+                    {
+                      text: "Cancel",
+                      callback_data: "try-cancel-ds",
                     },
                   ],
                 ],

@@ -78,6 +78,17 @@ After deposit, [${seller.username}](tg://user?id=${
             callback_data: "confirm-deposit",
           },
         ],
+
+          [
+          {
+            text: "CONFIRM[ADMIN]",
+            callback_data: "admin-confirm-deposit",
+          },
+          {
+            text: "CANCEL",
+            callback_data: "try-cancel-rd",
+          },
+        ],
       ],
     },
   });

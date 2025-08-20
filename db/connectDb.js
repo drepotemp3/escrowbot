@@ -32,6 +32,7 @@ function connectDb(retryCount = 0) {
       //Load system data into memory
       loadSystemData()
 
+      //
       global.client.connect();
     })
     .catch((err) => {

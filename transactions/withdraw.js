@@ -256,7 +256,7 @@ async function withdrawTokenSOL({ walletPrivateKey, toAddress, amount, tokenAddr
 
   if (solBalanceLamports < rentExemptionLamports + estimatedFeeLamports) {
     throw new Error(
-      `Not enough SOL for rent & fees. Need at least ${(rentExemptionLamports + estimatedFeeLamports) / LAMPORTS_PER_SOL} SOL`
+      `Not enough SOL for rent & fees. Need at least ${(rentExemptionLamports + estimatedFeeLamports) / solanaWeb3.LAMPORTS_PER_SOL} SOL`
     );
   }
 

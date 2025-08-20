@@ -32,25 +32,26 @@ const ERC20_ABI = [
 ];
 
 // Solana RPC and token addresses
-const SOL_RPC =
-  "https://lb.drpc.org/solana/AukSluwhPk7Poe7SNv7xbCjqmHeHdiAR8IjtIgaNGuYu";
+const SOL_RPC = "https://api.mainnet-beta.solana.com";
+
 const TOKENS_SOL = {
   usdt: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
   usdc: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
 };
 
 const checkSolBalance = async (walletAddress) => {
-  const connection = new Connection(SOL_RPC);
+  const connection = new Connection(SOL_RPC, "confirmed");
   const pubKey = new PublicKey(walletAddress);
 
-  const result = { native: null, usdt: null, usdc: null };
+  const result = { native: 0, usdt: 0, usdc: 0 };
 
   // Native SOL balance
   try {
     const solBalance = await connection.getBalance(pubKey);
     result.native = solBalance / 1e9;
-  } catch {
-    result.native = null;
+  } catch (error) {
+    console.error(error);
+    result.native = 0;
   }
 
   // SPL tokens (USDT, USDC)
@@ -58,12 +59,24 @@ const checkSolBalance = async (walletAddress) => {
     try {
       const mintPubKey = new PublicKey(mintAddr);
       const ata = await getAssociatedTokenAddress(mintPubKey, pubKey);
-      const accountInfo = await getAccount(connection, ata);
+      
+      // Check if account exists first
+      const accountInfo = await connection.getAccountInfo(ata);
+      if (!accountInfo) {
+        result[symbol] = 0;
+        continue;
+      }
+
+      const tokenAccount = await getAccount(connection, ata);
       const mintInfo = await getMint(connection, mintPubKey);
-      result[symbol] =
-        Number(accountInfo.amount) / Math.pow(10, mintInfo.decimals);
-    } catch {
-      result[symbol] = null;
+      
+      // Use BigInt for precise calculations
+      const balance = Number(tokenAccount.amount) / Math.pow(10, mintInfo.decimals);
+      result[symbol] = balance;
+      
+    } catch (error) {
+      console.error(error.message);
+      result[symbol] = 0;
     }
   }
 

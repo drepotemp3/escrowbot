@@ -1,8 +1,8 @@
-require("dotenv/config")
+require("dotenv/config");
 
 const { default: axios } = require("axios");
 
-const getNativeFee = async (coinType)=>{
+const getNativeFee = async (coinType, tokenType)=>{
       try {
     if (coinType === "BEP20" || coinType === "BNB") {
       const gasPriceRes = await axios.get("https://api.etherscan.io/v2/api?chainid=56", {
